@@ -1,0 +1,11 @@
+{
+  "name": "arena32",
+  "private": true,
+  "description": "ARENA 32 - jogo + servidor multiplayer (sem dependências npm)",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/run.js && node test/net.js && node test/client-smoke.js",
+    "sync-world": "cp ../shared/world.js ../site/world.js"
+  }
+}

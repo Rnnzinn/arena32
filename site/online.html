@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>Arena 32 Online</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0b1020;color:#fff;font-family:system-ui,sans-serif;font-size:14px}
+a{color:#7fd0ff}.hide{display:none!important}#top{display:flex;gap:12px;align-items:center;padding:10px 14px;background:#10162a;flex-wrap:wrap}
+.card{background:#10162a;border:1px solid #fff2;border-radius:12px;padding:12px;margin:10px;max-width:760px}
+button,input,select{font:inherit;padding:8px 12px;border-radius:8px;border:1px solid #fff3;background:#1b2238;color:#fff}button{cursor:pointer;background:#e53935;border:0;font-weight:700}button.g{background:#2a3350}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}.m{padding:6px 10px;background:#1b2238;border-radius:8px;margin:3px 0;display:flex;justify-content:space-between;gap:8px}
+#toast{position:fixed;left:50%;top:10px;transform:translateX(-50%);background:#000c;padding:8px 14px;border-radius:10px;z-index:50;display:none}
+#game{position:fixed;inset:0;background:#10162a;z-index:10}#cv{width:100%;height:100%;display:block;touch-action:none}
+#hud{position:fixed;left:10px;top:10px;font-weight:700;text-shadow:0 1px 3px #000;pointer-events:none}
+#ov{position:fixed;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;gap:10px;background:#000a;z-index:20;text-align:center}
+.av{font-size:26px;cursor:pointer;padding:2px 6px;border-radius:8px}.av.on{background:#ffb30055}
+</style></head><body>
+<div id="top"><b>ARENA 32 ONLINE</b><a href="index.html">← Jogo offline</a><span id="who"></span><button class="g hide" id="blogout">Sair da conta</button></div>
+<div id="toast"></div>
+<div id="warn" class="card hide"></div>
+
+<div id="auth" class="card hide">
+  <b>Entrar</b>
+  <div class="row"><input id="em" type="email" placeholder="e-mail" autocomplete="email"><input id="pw" type="password" placeholder="senha (mín. 8)" autocomplete="current-password"></div>
+  <div class="row"><button id="bin">Entrar</button><button class="g" id="bup">Criar conta</button><button class="g" id="brs">Esqueci a senha</button></div>
+  <div class="row"><button id="bgo" style="background:#4285f4">Entrar com Google</button><button class="g hide" id="bguest">Convidado (teste local)</button></div>
+  <div id="reset" class="hide row"><input id="np" type="password" placeholder="nova senha"><button id="bnp">Salvar nova senha</button></div>
+</div>
+
+<div id="home" class="hide">
+  <div class="card" id="prof"></div>
+  <div class="card"><b>Jogar online</b>
+    <div class="row"><button data-mode="br">Battle Royale (até 4 + bots)</button><button data-mode="x1">X1 (1 contra 1)</button><button data-mode="2x2">2X2 (duplas)</button></div>
+    <div class="row"><input id="code" maxlength="6" placeholder="CÓDIGO DA SALA" style="text-transform:uppercase"><button class="g" id="bjoin">Entrar na sala</button></div>
+  </div>
+  <div class="card"><b>Amigos</b>
+    <div class="row"><input id="fq" placeholder="apelido ou ID (ex.: 00012)"><button class="g" id="bfs">Buscar</button></div>
+    <div id="fres"></div><div id="flist"></div>
+  </div>
+</div>
+
+<div id="room" class="card hide"></div>
+<div id="game" class="hide"><canvas id="cv"></canvas><div id="hud"></div><div id="ov"></div></div>
+
+<script src="config.js"></script>
+<script src="world.js"></script>
+<script src="net.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script>
+const $ = id => document.getElementById(id), CFG = window.A32CFG || {};
+const KEYS = ['a32s', 'a32', 'a32f', 'a32k', 'a32h', 'a32c', 'a32m', 'a32q', 'a32n', 'a32m2'];   // dados do jogo offline que vão para a nuvem
+const AV = ['😀', '😎', '🤠', '👽', '🤖', '🐱', '🐶', '🦊'];
+let sb = null, net = null, prof = null, room = null, match = null, friends = [], onlineIds = [], timers = [], keys = {}, aim = 0, firing = false, joy = { x: 0, z: 0 };
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const show = (...ids) => ['auth', 'home', 'room', 'game'].forEach(i => $(i).classList.toggle('hide', !ids.includes(i)));
+function toast(t) { const e = $('toast'); e.textContent = t; e.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => e.style.display = 'none', 3500); }
+const local = ['localhost', '127.0.0.1'].includes(location.hostname);
+
+async function init() {
+  if (!CFG.WS_URL) { $('warn').classList.remove('hide'); $('warn').innerHTML = '<b>Servidor não configurado.</b> Edite <code>config.js</code> com o endereço do servidor multiplayer (WS_URL) e as chaves PÚBLICAS do Supabase. Veja docs/SETUP.md.'; }
+  if (CFG.SUPABASE_URL && CFG.SUPABASE_ANON_KEY && window.supabase) {
+    sb = supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
+    sb.auth.onAuthStateChange((ev, s) => { if (ev === 'PASSWORD_RECOVERY') { $('reset').classList.remove('hide'); show('auth'); } else if (s) onSession(s.access_token); else onOut(); });
+    const { data } = await sb.auth.getSession(); if (!data.session) show('auth');
+  } else { $('warn').classList.remove('hide'); $('warn').innerHTML += '<br>Supabase não configurado: login por e-mail/Google indisponível.'; show('auth'); }
+  if (local && CFG.WS_URL) $('bguest').classList.remove('hide');
+}
+$('bin').onclick = async () => { if (!sb) return toast('Supabase não configurado'); const { error } = await sb.auth.signInWithPassword({ email: $('em').value.trim(), password: $('pw').value }); if (error) toast(error.message); };
+$('bup').onclick = async () => { if (!sb) return toast('Supabase não configurado'); if ($('pw').value.length < 8) return toast('Senha com pelo menos 8 caracteres'); const { error } = await sb.auth.signUp({ email: $('em').value.trim(), password: $('pw').value, options: { emailRedirectTo: location.origin + location.pathname } }); toast(error ? error.message : 'Conta criada. Confirme o e-mail se o Supabase pedir.'); };
+$('bgo').onclick = async () => { if (!sb) return toast('Supabase não configurado'); const { error } = await sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: location.origin + location.pathname } }); if (error) toast(error.message); };
+$('brs').onclick = async () => { if (!sb) return toast('Supabase não configurado'); const { error } = await sb.auth.resetPasswordForEmail($('em').value.trim(), { redirectTo: location.origin + location.pathname }); toast(error ? error.message : 'Enviamos um e-mail para recuperar a senha'); };
+$('bnp').onclick = async () => { const { error } = await sb.auth.updateUser({ password: $('np').value }); toast(error ? error.message : 'Senha alterada'); if (!error) $('reset').classList.add('hide'); };
+$('blogout').onclick = async () => { if (sb) await sb.auth.signOut(); onOut(); };
+$('bguest').onclick = () => onSession('guest:Teste' + Math.floor(Math.random() * 900 + 100));
+
+async function onSession(token) {
+  try {
+    net = new A32Net(CFG.WS_URL); await net.connect(token); bindNet();
+    if (sb && !token.startsWith('guest:')) { await loadProfile(); await pullSave(); }
+    else prof = { nickname: net.user.name, player_code: '-----', avatar: 'a1', level: 1, coins: 0, nickname_set: true, guest: true };
+    $('who').textContent = prof.nickname + ' #' + prof.player_code; $('blogout').classList.remove('hide');
+    renderProfile(); show('home'); timers.push(setInterval(() => { net.presence(friends.filter(f => f.status === 'accepted').map(f => f.uid)); }, 15000)); listFriends();
+  } catch (e) { toast('Falha ao conectar: ' + e.message); show('auth'); }
+}
+function onOut() { timers.forEach(clearInterval); timers = []; if (net) net.close(); net = null; prof = null; room = null; $('blogout').classList.add('hide'); $('who').textContent = ''; show('auth'); }
+
+async function loadProfile() {
+  const { data: u } = await sb.auth.getUser();
+  let { data } = await sb.from('profiles').select('nickname,player_code,avatar,photo_url,level,xp,coins,nickname_set').eq('id', u.user.id).single();
+  if (data && !data.nickname_set) { const n = prompt('Escolha seu apelido (3 a 16 letras/números/_). A primeira escolha é grátis:'); if (n) { const r = await sb.rpc('set_nickname', { p_nick: n }); if (r.error) toast(r.error.message); const again = await sb.from('profiles').select('nickname,player_code,avatar,photo_url,level,xp,coins,nickname_set').eq('id', u.user.id).single(); data = again.data; } }
+  prof = data;
+}
+function renderProfile() {
+  const p = prof, av = AV[(parseInt(String(p.avatar).replace('a', '')) || 1) - 1] || AV[0];
+  $('prof').innerHTML = '<div class="row"><span style="font-size:38px">' + (p.photo_url ? '<img src="' + esc(p.photo_url) + '" width="44" height="44" style="border-radius:50%">' : av) + '</span><div><b>' + esc(p.nickname) + '</b> · ID ' + esc(p.player_code) + '<br>Nível ' + (p.level || 1) + ' · 🪙 ' + (p.coins || 0) + '</div></div>'
+    + (p.guest ? '<div>Convidado de teste local: nada é salvo na nuvem.</div>' : '<div class="row">' + AV.map((a, i) => '<span class="av' + (('a' + (i + 1)) === p.avatar ? ' on' : '') + '" data-av="a' + (i + 1) + '">' + a + '</span>').join('') + '</div>'
+      + '<div class="row"><button class="g" id="bnick">Trocar apelido (1.000 moedas)</button><button class="g" id="bpush">Enviar progresso do jogo</button><button class="g" id="bpull">Baixar progresso</button><label class="g" style="padding:8px 12px;border-radius:8px;background:#2a3350">Foto <input id="bph" type="file" accept="image/*" style="display:none"></label></div>');
+  document.querySelectorAll('[data-av]').forEach(e => e.onclick = async () => { const r = await sb.rpc('set_avatar', { p_avatar: e.dataset.av }); if (r.error) toast(r.error.message); else { prof.avatar = e.dataset.av; renderProfile(); } });
+  if ($('bnick')) { $('bnick').onclick = changeNick; $('bpush').onclick = () => pushSave(true); $('bpull').onclick = () => pullSave(true); $('bph').onchange = uploadPhoto; }
+}
+async function changeNick() {
+  const n = prompt('Novo apelido:'); if (!n) return;
+  if (!confirm('Trocar o apelido custa 1.000 moedas. Seu saldo: ' + prof.coins + '. Confirmar?')) return;
+  if ((prof.coins || 0) < 1000) return toast('Saldo insuficiente');
+  const r = await sb.rpc('set_nickname', { p_nick: n }); if (r.error) return toast(r.error.message);
+  await loadProfile(); try { const st = JSON.parse(localStorage.getItem('a32s') || '{}'); st.c = prof.coins; localStorage.setItem('a32s', JSON.stringify(st)); } catch (e) { }
+  renderProfile(); $('who').textContent = prof.nickname + ' #' + prof.player_code; toast('Apelido alterado');
+}
+async function uploadPhoto(e) {
+  const f = e.target.files[0]; if (!f) return; if (f.size > 500000) return toast('Foto até 500 KB');
+  const { data: u } = await sb.auth.getUser(), path = u.user.id + '/avatar'; const up = await sb.storage.from('avatars').upload(path, f, { upsert: true, contentType: f.type });
+  if (up.error) return toast(up.error.message); const url = sb.storage.from('avatars').getPublicUrl(path).data.publicUrl + '?t=' + Date.now();
+  const r = await sb.rpc('set_photo', { p_url: url }); if (r.error) return toast(r.error.message); prof.photo_url = url; renderProfile();
+}
+// ---- nuvem: progresso do jogo offline ----
+function localSave() { const d = {}; KEYS.forEach(k => { const v = localStorage.getItem(k); if (v != null) d[k] = v; }); return d; }
+async function pushSave(manual) { const r = await sb.rpc('push_save', { p_data: localSave() }); if (manual) toast(r.error ? r.error.message : 'Progresso enviado para a nuvem'); if (!r.error) await loadProfile(); }
+async function pullSave(manual) {
+  const { data } = await sb.from('cloud_saves').select('data,updated_at').maybeSingle();
+  if (!data) { await pushSave(); return; }
+  let lx = 0, cx = 0; try { lx = JSON.parse(localStorage.getItem('a32s') || '{}').xp || 0; cx = JSON.parse(data.data.a32s || '{}').xp || 0; } catch (e) { }
+  if (cx > lx || (manual && confirm('Substituir o progresso deste aparelho pelo da nuvem?'))) { Object.keys(data.data).forEach(k => KEYS.includes(k) && localStorage.setItem(k, data.data[k])); if (manual || lx) toast('Progresso da nuvem carregado'); }
+  else if (lx > cx) await pushSave();
+}
+// ---- amigos ----
+async function listFriends() { if (!sb || prof.guest) return; const r = await sb.rpc('list_friends'); friends = r.data || []; renderFriends(); net.presence(friends.filter(f => f.status === 'accepted').map(f => f.uid)); }
+function renderFriends() {
+  $('flist').innerHTML = friends.map(f => '<div class="m"><span>' + (onlineIds.includes(f.uid) ? '🟢' : '⚪') + ' ' + esc(f.nickname) + ' #' + esc(f.code) + (f.status === 'pending' ? (f.incoming ? ' · quer ser seu amigo' : ' · pendente') : '') + '</span><span>'
+    + (f.status === 'pending' && f.incoming ? '<button data-ac="' + f.fid + '">Aceitar</button> <button class="g" data-rc="' + f.fid + '">Recusar</button>' : '')
+    + (f.status === 'accepted' ? (room ? '<button data-inv="' + f.uid + '">Convidar</button> ' : '') + '<button class="g" data-rm="' + f.fid + '">Remover</button>' : '') + '</span></div>').join('') || '<div>Nenhum amigo ainda.</div>';
+  document.querySelectorAll('[data-ac]').forEach(b => b.onclick = async () => { await sb.rpc('respond_friend', { p_id: b.dataset.ac, p_accept: true }); listFriends(); });
+  document.querySelectorAll('[data-rc]').forEach(b => b.onclick = async () => { await sb.rpc('respond_friend', { p_id: b.dataset.rc, p_accept: false }); listFriends(); });
+  document.querySelectorAll('[data-rm]').forEach(b => b.onclick = async () => { if (confirm('Remover amigo?')) { await sb.rpc('remove_friend', { p_id: b.dataset.rm }); listFriends(); } });
+  document.querySelectorAll('[data-inv]').forEach(b => b.onclick = () => net.invite(b.dataset.inv));
+}
+$('bfs').onclick = async () => {
+  if (!sb || prof.guest) return toast('Amigos precisam de conta'); const r = await sb.rpc('search_players', { q: $('fq').value.trim() }); if (r.error) return toast(r.error.message);
+  $('fres').innerHTML = (r.data || []).map(p => '<div class="m"><span>' + esc(p.nickname) + ' #' + esc(p.player_code) + ' · nv ' + p.level + '</span><button data-add="' + p.id + '">Adicionar</button></div>').join('') || '<div>Ninguém encontrado.</div>';
+  document.querySelectorAll('[data-add]').forEach(b => b.onclick = async () => { const x = await sb.rpc('send_friend_request', { p_target: b.dataset.add }); toast(x.error ? x.error.message : 'Solicitação enviada'); listFriends(); });
+};
+// ---- salas ----
+document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => net.createRoom(b.dataset.mode));
+$('bjoin').onclick = () => net.join($('code').value);
+const MN = { br: 'Battle Royale', x1: 'X1', '2x2': '2X2' };
+function renderRoom() {
+  const r = room, me = net.user.id, lead = r.leader === me;
+  $('room').innerHTML = '<b>Sala ' + MN[r.mode] + '</b> · código <b style="font-size:22px;letter-spacing:3px">' + r.code + '</b> · ' + r.members.length + '/' + r.max + ' jogadores reais' + (r.mode === 'br' ? ' (bots completam até 32)' : ' (sem bots)')
+    + r.members.map(m => '<div class="m"><span>' + (m.leader ? '👑 ' : '') + esc(m.name) + (m.id === me ? ' (você)' : '') + (r.mode !== 'br' ? ' · Equipe ' + (m.team === 0 ? 'A' : 'B') : '') + '</span><span>' + (m.id === me && r.mode !== 'br' ? '<button class="g" data-team="' + (1 - m.team) + '">Trocar lado</button>' : '') + '</span></div>').join('')
+    + '<div class="row">' + (lead ? '<button id="bstart">Iniciar partida</button>' : '<span>Aguardando o líder iniciar…</span>') + '<button class="g" id="bleave">Sair da sala</button></div><div id="cdn"></div><div id="fl2"></div>';
+  document.querySelectorAll('[data-team]').forEach(b => b.onclick = () => net.team(Number(b.dataset.team)));
+  if ($('bstart')) $('bstart').onclick = () => net.start(); $('bleave').onclick = () => net.leave();
+  renderFriends();
+}
+function bindNet() {
+  net.on('room', m => { room = m.room; if (!match) { renderRoom(); show('room'); } });
+  net.on('left', () => { room = null; match = null; show('home'); });
+  net.on('err', m => toast(m.msg || m.code));
+  net.on('presence', m => { onlineIds = m.online; renderFriends(); });
+  net.on('invite_ok', () => toast('Convite enviado'));
+  net.on('invited', m => { if (confirm(m.from.name + ' convidou você para ' + MN[m.mode] + '. Entrar?')) net.join(m.code); });
+  net.on('countdown', m => { if ($('cdn')) $('cdn').innerHTML = '<h2>Começa em ' + m.n + '…</h2>'; });
+  net.on('start', startMatch);
+  net.on('snap', onSnap);
+  net.on('end', onEnd);
+  net.on('rematch', m => { $('ov').innerHTML += '<div>Revanche: ' + m.votes + '/' + m.need + '</div>'; });
+  net.on('close', () => { if (net) { toast('Conexão perdida'); onOut(); } });
+}
+// ---- partida ----
+const cv = $('cv'), cx = cv.getContext('2d');
+function startMatch(m) { match = { m, me: m.players.findIndex(p => p.id === net.user.id), snap: null, tr: [], rs: [0, 0], over: false }; $('ov').style.display = 'none'; show('game'); resize(); requestAnimationFrame(draw); }
+function onSnap(s) { if (!match) return; match.snap = s; match.rs = s.rs; const now = performance.now(); for (const e of s.ev) { if (e.k === 's') match.tr.push({ x: e.x, z: e.z, a: e.a, l: e.l, t: now }); if (e.k === 'r') toast(e.w < 0 ? 'Rodada empatada' : 'Equipe ' + (e.w === 0 ? 'A' : 'B') + ' venceu a rodada'); if (e.k === 'n') toast('Rodada ' + e.r); } }
+function onEnd(m) {
+  if (!match) return; match.over = true; const r = m.result, me = r.rows.find(x => x.id === net.user.id) || {};
+  const win = r.mode === 'br' ? me.place === 1 : me.team === r.winner;
+  $('ov').style.display = 'flex'; $('ov').innerHTML = '<h1>' + (win ? '🏆 VITÓRIA' : 'Derrota') + '</h1>' + (r.mode !== 'br' ? '<div>Placar de rodadas: ' + r.rounds[0] + ' x ' + r.rounds[1] + '</div>' : '<div>Sua posição: #' + (me.place || '-') + '</div>')
+    + '<div style="min-width:300px">' + r.rows.map(x => '<div class="m"><span>' + esc(x.name) + (r.mode !== 'br' ? ' (' + (x.team === 0 ? 'A' : 'B') + ')' : '') + '</span><span>☠ ' + x.kills + ' · dano ' + x.dmg + ' · +' + x.xp + ' XP · +' + x.coins + '🪙</span></div>').join('') + '</div>'
+    + '<div class="row"><button id="brm">Revanche</button><button class="g" id="bex">Sair</button></div>';
+  $('brm').onclick = () => { net.rematch(); $('brm').disabled = true; }; $('bex').onclick = () => { net.leave(); };
+  if (sb && prof && !prof.guest) setTimeout(() => loadProfile().then(renderProfile), 1500);
+}
+function resize() { cv.width = innerWidth * devicePixelRatio; cv.height = innerHeight * devicePixelRatio; }
+addEventListener('resize', resize);
+function draw() {
+  if (!match) return; const s = match.snap, m = match.m, W = cv.width, H = cv.height; cx.fillStyle = '#16301a'; cx.fillRect(0, 0, W, H);
+  if (s) {
+    const me = s.p[match.me], span = m.mode === 'br' ? 50 : 38, k = Math.min(W, H) / 2 / span, ox = W / 2 - me[0] * k, oz = H / 2 - me[1] * k, X = v => v * k + ox, Z = v => v * k + oz, half = m.world.size / 2;
+    cx.strokeStyle = '#fff'; cx.lineWidth = 2; cx.strokeRect(X(-half), Z(-half), half * 2 * k, half * 2 * k);
+    cx.fillStyle = '#6b6f7a'; m.world.obs.forEach(o => cx.fillRect(X(o.x - o.w / 2), Z(o.z - o.d / 2), o.w * k, o.d * k));
+    if (s.z) { cx.strokeStyle = '#4fc3f7'; cx.lineWidth = 3; cx.beginPath(); cx.arc(X(s.z[0]), Z(s.z[1]), s.z[2] * k, 0, 6.3); cx.stroke(); }
+    const now = performance.now(); match.tr = match.tr.filter(t => now - t.t < 120);
+    cx.strokeStyle = '#ffee88'; cx.lineWidth = 2; match.tr.forEach(t => { cx.beginPath(); cx.moveTo(X(t.x), Z(t.z)); cx.lineTo(X(t.x - Math.sin(t.a) * t.l), Z(t.z - Math.cos(t.a) * t.l)); cx.stroke(); });
+    const myTeam = m.players[match.me].team; let alive = 0;
+    m.players.forEach((p, i) => {
+      const q = s.p[i]; if (!q[4]) return; alive++;
+      cx.fillStyle = i === match.me ? '#7CFC00' : (m.mode !== 'br' && p.team === myTeam) ? '#4da3ff' : p.bot ? '#999' : '#ff5252'; cx.beginPath(); cx.arc(X(q[0]), Z(q[1]), .6 * k, 0, 6.3); cx.fill();
+      cx.strokeStyle = '#000'; cx.lineWidth = 2; cx.beginPath(); cx.moveTo(X(q[0]), Z(q[1])); cx.lineTo(X(q[0] - Math.sin(q[2]) * 1.4), Z(q[1] - Math.cos(q[2]) * 1.4)); cx.stroke();
+      cx.fillStyle = '#300'; cx.fillRect(X(q[0]) - 14, Z(q[1]) - .6 * k - 9, 28, 4); cx.fillStyle = '#4f4'; cx.fillRect(X(q[0]) - 14, Z(q[1]) - .6 * k - 9, 28 * q[3] / 100, 4);
+      if (!p.bot) { cx.fillStyle = '#fff'; cx.font = '12px system-ui'; cx.textAlign = 'center'; cx.fillText(p.name, X(q[0]), Z(q[1]) - .6 * k - 13); }
+    });
+    $('hud').innerHTML = '❤ ' + me[3] + ' · ☠ ' + me[5] + (m.mode === 'br' ? ' · 👥 ' + alive : ' · Rodada ' + s.rd + ' · A ' + s.rs[0] + ' x ' + s.rs[1] + ' B') + (me[4] ? '' : '<br>Você foi eliminado — assistindo');
+  }
+  requestAnimationFrame(draw);
+}
+// entrada: teclado/mouse (PC) e toque (celular)
+addEventListener('keydown', e => { keys[e.key.toLowerCase()] = 1; if (match && e.key === ' ') e.preventDefault(); }); addEventListener('keyup', e => keys[e.key.toLowerCase()] = 0);
+function aimTo(x, y) { aim = Math.atan2(-(x - innerWidth / 2), -(y - innerHeight / 2)); }
+cv.addEventListener('mousemove', e => aimTo(e.clientX, e.clientY)); cv.addEventListener('mousedown', e => { aimTo(e.clientX, e.clientY); firing = true; }); addEventListener('mouseup', () => firing = false);
+let jt = null, jo = null;
+cv.addEventListener('touchstart', e => { for (const t of e.changedTouches) { if (t.clientX < innerWidth / 2) { jt = t.identifier; jo = { x: t.clientX, y: t.clientY }; } else { aimTo(t.clientX, t.clientY); firing = true; } } e.preventDefault(); }, { passive: false });
+cv.addEventListener('touchmove', e => { for (const t of e.changedTouches) { if (t.identifier === jt) { const dx = t.clientX - jo.x, dy = t.clientY - jo.y, l = Math.hypot(dx, dy) || 1, f = Math.min(1, l / 50); joy = { x: dx / l * f, z: dy / l * f }; } else { aimTo(t.clientX, t.clientY); } } e.preventDefault(); }, { passive: false });
+cv.addEventListener('touchend', e => { for (const t of e.changedTouches) { if (t.identifier === jt) { jt = null; joy = { x: 0, z: 0 }; } else firing = false; } });
+// envia a intenção do jogador 20x por segundo (o servidor decide o resto)
+setInterval(() => { if (!match || match.over || !match.snap || !net) return; if (!match.snap.p[match.me][4]) return; net.input({ mx: joy.x || (keys.d ? 1 : 0) - (keys.a ? 1 : 0), mz: joy.z || (keys.s ? 1 : 0) - (keys.w ? 1 : 0), yaw: aim, fire: firing || !!keys[' '] }); }, 50);
+init();
+</script>
+</body></html>

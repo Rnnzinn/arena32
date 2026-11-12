@@ -1,6 +1,7 @@
 'use strict';
 const crypto = require('crypto');
 const { Game } = require('./game');
+const { DuelRoom } = require('./duelroom');
 const W = require('../../shared/world');
 const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -81,11 +82,11 @@ class Room {
 }
 
 class Rooms {
-  constructor(o, supa) { this.o = Object.assign({ countdownMs: 5000, tickMs: 50 }, o); this.supa = supa; this.rooms = new Map(); this.byUser = new Map(); }
+  constructor(o, supa) { this.o = Object.assign({ countdownMs: 5000, tickMs: 50, loadMs: 45000, graceMs: 30000 }, o); this.supa = supa; this.rooms = new Map(); this.byUser = new Map(); }
   code() { for (;;) { let c = ''; for (let i = 0; i < 6; i++) c += ALPHA[crypto.randomInt(ALPHA.length)]; if (!this.rooms.has(c)) return c; } }
   create(user, mode) {
     if (!W.MODES[mode]) return null;
-    const r = new Room(this, this.code(), mode, user); this.rooms.set(r.code, r); this.byUser.set(user.id, r); return r;
+    const r = mode === 'br' ? new Room(this, this.code(), mode, user) : new DuelRoom(this, this.code(), mode, user); this.rooms.set(r.code, r); this.byUser.set(user.id, r); return r;
   }
   join(user, code) {
     const r = this.rooms.get(String(code || '').toUpperCase()); if (!r) return { err: 'not_found', msg: 'Sala não encontrada' };
@@ -94,5 +95,7 @@ class Rooms {
     r.add(user); this.byUser.set(user.id, r); return { room: r };
   }
   leave(id) { const r = this.byUser.get(id); if (!r) return; this.byUser.delete(id); r.leave(id); }
+  // queda de conexão: salas de duelo seguram a vaga (reconexão); as demais saem na hora
+  disconnect(id, conn) { const r = this.byUser.get(id); if (!r) return; if (r.duelRoom) r.disconnect(id, conn); else { this.byUser.delete(id); r.leave(id); } }
 }
 module.exports = { Rooms };

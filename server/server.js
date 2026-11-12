@@ -5,25 +5,37 @@ const { verify } = require('./lib/auth');
 const { Rooms } = require('./lib/rooms');
 const makeSupa = require('./lib/supa');
 
+const normO = s => String(s || '').trim().toLowerCase().replace(/\/+$/, '');
+
 function createServer(o = {}) {
   const env = process.env;
   const cfg = {
     allowGuest: o.allowGuest ?? env.ALLOW_GUEST === '1',
     jwtSecret: o.jwtSecret ?? env.SUPABASE_JWT_SECRET,
     jwksUrl: o.jwksUrl ?? ((o.supabaseUrl ?? env.SUPABASE_URL) ? (o.supabaseUrl ?? env.SUPABASE_URL) + '/auth/v1/.well-known/jwks.json' : ''),
-    origins: String(o.origins ?? env.ALLOWED_ORIGINS ?? '').split(',').map(s => s.trim()).filter(Boolean)
+    origins: String(o.origins ?? env.ALLOWED_ORIGINS ?? '').split(',').map(normO).filter(Boolean),
+    supaUrl: o.supabaseUrl ?? env.SUPABASE_URL ?? '',
+    anonKey: o.anonKey ?? env.SUPABASE_ANON_KEY ?? '' // chave PÚBLICA (anon): pode ser exposta, ao contrário da service_role
   };
+  // aceita "https://site.netlify.app", com "/" no fim, maiúsculas, ou "*" (libera tudo; não recomendado)
+  const originOk = origin => !cfg.origins.length || cfg.origins.includes('*') || cfg.origins.includes(normO(origin));
+  const cors = (req, res) => { const og = req.headers.origin; if (og && originOk(og)) { res.setHeader('Access-Control-Allow-Origin', og); res.setHeader('Vary', 'Origin'); res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS'); } };
   const supa = makeSupa({ url: o.supabaseUrl ?? env.SUPABASE_URL, serviceKey: o.serviceKey ?? env.SUPABASE_SERVICE_ROLE_KEY });
-  const rooms = new Rooms({ countdownMs: o.countdownMs ?? 5000, tickMs: o.tickMs ?? 50 }, supa);
+  const rooms = new Rooms({ countdownMs: o.countdownMs ?? 5000, tickMs: o.tickMs ?? 50, loadMs: o.loadMs ?? 45000, graceMs: o.graceMs ?? 30000 }, supa);
   const online = new Map();
 
   const srv = http.createServer((req, res) => {
-    if (req.url === '/health') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, rooms: rooms.rooms.size, online: online.size })); return; }
+    cors(req, res);
+    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+    const path = req.url.split('?')[0];
+    if (path === '/health') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, rooms: rooms.rooms.size, online: online.size })); return; }
+    // valores PÚBLICOS para o site se configurar sozinho (URL do projeto e chave anon). Nunca inclui service_role nem JWT secret.
+    if (path === '/config') { res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify({ supabaseUrl: cfg.supaUrl, supabaseAnonKey: cfg.anonKey })); return; }
     res.writeHead(404); res.end();
   });
   srv.on('upgrade', (req, socket) => {
     if (req.url.split('?')[0] !== '/ws') { socket.destroy(); return; }
-    if (cfg.origins.length && !cfg.origins.includes(req.headers.origin)) { socket.destroy(); return; }
+    if (!originOk(req.headers.origin)) { console.log('[ws] origem RECUSADA: "' + req.headers.origin + '" | permitidas: ' + cfg.origins.join(', ')); socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); socket.destroy(); return; }
     accept(req, socket, conn => onConn(conn));
   });
 
@@ -42,7 +54,7 @@ function createServer(o = {}) {
     });
     c.on('close', () => {
       clearInterval(tm); clearTimeout(authTimer);
-      if (c.user) { rooms.leave(c.user.id); if (online.get(c.user.id) === c) online.delete(c.user.id); }
+      if (c.user) { rooms.disconnect(c.user.id, c); if (online.get(c.user.id) === c) online.delete(c.user.id); }
     });
   }
 
@@ -51,7 +63,7 @@ function createServer(o = {}) {
       let u; try { u = await verify(m.token, cfg); } catch (e) { err(c, 'auth', 'Login inválido'); return c.close(4001); }
       let code = null;
       try { const p = await supa.profile(u.id); if (p) { u.name = p.nickname; code = p.player_code; } } catch (e) { /* segue com os dados do token */ }
-      const old = online.get(u.id); if (old && old !== c) { old.user = null; old.close(4002); } // 1 sessão por conta
+      const old = online.get(u.id); if (old && old !== c) { rooms.disconnect(u.id, old); old.user = null; old.close(4002); } // 1 sessão por conta
       c.user = { id: u.id, name: u.name, code }; online.set(u.id, c);
       return send(c, { t: 'ready', user: c.user, supabase: supa.enabled });
     }
@@ -64,11 +76,11 @@ function createServer(o = {}) {
         return send(c, { t: 'presence', online: ids.filter(i => online.has(i)) });
       }
       case 'room_create': {
-        rooms.leave(me.id); const r = rooms.create({ id: me.id, name: me.name, conn: c }, m.mode);
+        rooms.leave(me.id); const r = rooms.create({ id: me.id, name: me.name, conn: c, cfg: m.cfg }, m.mode);
         if (!r) return err(c, 'bad_mode', 'Modo inválido'); return r.push();
       }
       case 'room_join': {
-        rooms.leave(me.id); const j = rooms.join({ id: me.id, name: me.name, conn: c }, m.code);
+        rooms.leave(me.id); const j = rooms.join({ id: me.id, name: me.name, conn: c, cfg: m.cfg }, m.code);
         if (j.err) return err(c, j.err, j.msg); return j.room.push();
       }
       case 'room_leave': rooms.leave(me.id); return send(c, { t: 'left' });
@@ -78,7 +90,17 @@ function createServer(o = {}) {
         const e = r.start(me.id); if (e) err(c, e.code, e.msg); return;
       }
       case 'rematch': { const r = rooms.byUser.get(me.id); if (r) r.rematch(me.id); return; }
-      case 'in': { const r = rooms.byUser.get(me.id); if (r && r.status === 'playing' && r.game) r.game.input(me.id, m); return; }
+      case 'in': { const r = rooms.byUser.get(me.id); if (r && r.status === 'playing') { if (r.duelRoom) { if (r.duel) r.duel.input(me.id, m); } else if (r.game) r.game.input(me.id, m); } return; }
+      // ---- salas de duelo (X1 / 2X2): configuração, prontos, reconexão ----
+      case 'settings': case 'weapon': case 'ready': case 'cfg': case 'loaded': case 'to_lobby': {
+        const r = rooms.byUser.get(me.id); if (!r || !r.duelRoom) return err(c, 'no_room', 'Isso só vale em salas X1 ou 2X2');
+        const e = m.t === 'settings' ? r.setSettings(me.id, m) : m.t === 'weapon' ? r.setWeapon(me.id, m.w) : m.t === 'ready' ? r.setReady(me.id, m.r) : m.t === 'cfg' ? (r.setCfg(me.id, m.cfg), null) : m.t === 'loaded' ? (r.loaded(me.id, m.cfg), null) : (r.toLobby(me.id), null);
+        if (e) err(c, e, 'Ação não permitida agora'); return;
+      }
+      case 'room_rejoin': {
+        const r = rooms.rooms.get(String(m.code || '').toUpperCase()); if (!r || !r.duelRoom || !r.members.has(me.id)) return err(c, 'not_found', 'Sala não encontrada para você');
+        rooms.byUser.set(me.id, r); r.rejoin(me.id, c); return;
+      }
       case 'invite': {
         const r = rooms.byUser.get(me.id); if (!r || r.status !== 'lobby') return err(c, 'no_room', 'Crie uma sala antes de convidar');
         if (typeof m.to !== 'string' || m.to === me.id) return;
